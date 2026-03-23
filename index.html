@@ -1,0 +1,1210 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>商场/医院室内导航</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/maplibre-gl@5.12.0/dist/maplibre-gl.js"></script>
+    <link href="https://unpkg.com/maplibre-gl@5.12.0/dist/maplibre-gl.css" rel="stylesheet" />
+    <style>
+        body { margin: 0; padding: 0; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", Arial, sans-serif; background-color: #e5e7eb; }
+        #map3d { position: absolute; top: 0; bottom: 0; left: 0; right: 0; }
+        #routeCanvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 35; }
+        
+        /* 玻璃态与高级阴影 */
+        .glass-panel { background: rgba(255, 255, 255, 0.96); backdrop-filter: blur(12px); box-shadow: 0 4px 20px rgba(0,0,0,0.08); border: 1px solid rgba(255,255,255,0.4); }
+        .pointer-events-auto { pointer-events: auto; }
+        .pointer-events-none { pointer-events: none; }
+        
+        /* 底部抽屉动画 */
+        #bottomSheet { transition: transform 0.4s cubic-bezier(0.2, 0.8, 0.2, 1); }
+        .sheet-hidden { transform: translateY(100%); }
+        .sheet-visible { transform: translateY(0); }
+
+        /* 顶部导航指示牌动画 */
+        #navTopBanner { transition: transform 0.4s cubic-bezier(0.2, 0.8, 0.2, 1); }
+        .banner-hidden { transform: translateY(-150%); }
+        .banner-visible { transform: translateY(0); }
+        
+        /* 渐变与状态色 */
+        .bg-nav-green { background-color: #22c55e; }
+        .bg-nav-blue { background: linear-gradient(135deg, #3b82f6, #4f46e5); }
+
+        /* 起终点 SVG 标记 */
+        .nav-poi-marker {
+            pointer-events: none;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            transform: translateY(-8px);
+            filter: drop-shadow(0 4px 10px rgba(0, 0, 0, 0.28));
+        }
+        .nav-poi-role {
+            margin-top: -2px;
+            font-size: 11px;
+            font-weight: 700;
+            color: #ffffff;
+            line-height: 1.1;
+            text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
+        }
+        .nav-poi-name {
+            margin-top: 1px;
+            max-width: 86px;
+            font-size: 10px;
+            font-weight: 600;
+            color: #ffffff;
+            line-height: 1.1;
+            text-align: center;
+            text-shadow: 0 1px 2px rgba(0, 0, 0, 0.55);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+    </style>
+</head>
+<body>
+    <div id="map3d"></div>
+    <canvas id="routeCanvas"></canvas>
+
+    <!-- UI Overlay (保持在最顶层) -->
+    <div class="absolute inset-0 pointer-events-none z-50 overflow-hidden">
+        
+        <!-- 🌟 1. 顶部 App Bar (搜索 + 楼层) -->
+        <div id="topAppBar" class="absolute top-0 left-0 right-0 z-50 px-4 pt-10 pb-3 bg-white/85 backdrop-blur-md shadow-sm border-b border-gray-100 flex gap-3 items-center pointer-events-auto transition-transform duration-500">
+            <!-- 搜索框 -->
+            <div class="relative flex-1">
+                <svg class="absolute left-3.5 top-2.5 w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
+                <input type="text" id="poiSearchInput" class="w-full bg-gray-100 rounded-full pl-10 pr-4 py-2.5 text-[15px] focus:outline-none focus:bg-white focus:ring-2 focus:ring-blue-500 transition-all placeholder-gray-500" placeholder="搜地点、科室、洗手间" onkeyup="handlePoiSearch(this.value)" onfocus="handlePoiSearch(this.value)" onblur="setTimeout(() => document.getElementById('poiSearchResults').classList.add('hidden'), 200)">
+                <div id="poiSearchResults" class="absolute top-full left-0 w-full mt-2 bg-white rounded-2xl shadow-xl max-h-64 overflow-y-auto hidden border border-gray-100"></div>
+            </div>
+            
+            <!-- 楼层下拉器 -->
+            <div class="relative group cursor-pointer">
+                <div class="h-10 px-4 bg-blue-50 text-blue-700 font-bold rounded-full flex items-center justify-center gap-1 border border-blue-100 shadow-sm" id="currentFloorBtn">
+                    ALL
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+                </div>
+                <div class="absolute right-0 top-full mt-2 w-28 bg-white rounded-2xl shadow-xl border border-gray-100 overflow-hidden flex-col hidden group-hover:flex" id="floorDropdown"></div>
+            </div>
+        </div>
+
+        <!-- 🌟 2. 右侧悬浮工具 -->
+        <div id="rightTools" class="absolute top-32 right-4 z-40 flex flex-col gap-3 transition-opacity duration-500 pointer-events-auto">
+            <button onclick="resetCompass()" class="w-11 h-11 bg-white/95 backdrop-blur-md rounded-full shadow-md flex items-center justify-center border border-gray-100 hover:bg-gray-50 active:scale-95 transition-all">
+                <svg id="compassIcon" class="w-6 h-6" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="transition: transform 0.05s linear; transform: rotate(0deg);">
+                    <path d="M12 2L16.5 12L12 10.5L7.5 12L12 2Z" fill="#ef4444"/><path d="M12 22L16.5 12L12 10.5L7.5 12L12 22Z" fill="#9ca3af"/>
+                </svg>
+            </button>
+        </div>
+
+        <!-- 🌟 3. 底部抽屉 (Bottom Sheet) -->
+        <div id="bottomSheet" class="absolute bottom-0 left-0 right-0 z-50 bg-white rounded-t-3xl shadow-[0_-10px_40px_rgba(0,0,0,0.12)] sheet-hidden pb-[env(safe-area-inset-bottom)] pointer-events-auto">
+            <!-- 抽屉把手 -->
+            <div class="w-12 h-1.5 bg-gray-200 rounded-full mx-auto mt-4 mb-2"></div>
+            <!-- 动态注入内容区 -->
+            <div id="bottomSheetContent" class="px-6 pb-8 pt-2"></div>
+        </div>
+
+        <!-- 🌟 4. 沉浸式导航状态 UI -->
+        <!-- 顶部绿牌 -->
+        <div id="navTopBanner" class="absolute top-12 left-4 right-4 z-50 banner-hidden pointer-events-auto">
+            <div class="bg-nav-green text-white rounded-2xl shadow-xl p-5 flex items-center gap-5">
+                <svg class="w-14 h-14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 10l7-7m0 0l7 7m-7-7v18"></path></svg>
+                <div>
+                    <div class="text-3xl font-extrabold tracking-wide mb-1" id="navDirectionText">请直行</div>
+                    <div class="bg-black/20 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium gap-1">
+                        <span class="w-1.5 h-1.5 bg-white rounded-full animate-pulse"></span>
+                        <span id="navEtaTop">预计 3分钟后 到达</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 底部退出卡片 (融入Bottom Sheet位置) -->
+        <div id="navBottomCard" class="absolute bottom-0 left-0 right-0 z-50 bg-white rounded-t-3xl shadow-[0_-10px_40px_rgba(0,0,0,0.12)] pb-[env(safe-area-inset-bottom)] sheet-hidden pointer-events-auto">
+            <div class="px-6 py-5 flex items-center justify-between">
+                <div>
+                    <h2 id="uiDestName" class="text-2xl font-bold text-gray-800 mb-1 truncate max-w-[200px]">目的地</h2>
+                    <p id="uiDestFloor" class="text-sm text-gray-500 flex items-center gap-1">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
+                        剩余 <span id="uiDistVal" class="font-bold text-gray-700">0米</span>
+                    </p>
+                </div>
+                <button onclick="stopSimulation()" class="w-14 h-14 bg-red-50 text-red-500 rounded-full flex items-center justify-center hover:bg-red-100 transition-colors shadow-sm border border-red-100">
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                </button>
+            </div>
+        </div>
+
+    </div>
+
+    <script>
+        const MAP_DATA = {"version":"2.1","global":{"coordSystem":"WGS84_MAPBOX_LEGACY","anchors":[{"id":"anchor_1773634963751_1","x":1622.7786871258234,"y":2003.8276996937125,"lat":37.112511699855354,"lng":111.79801640885407,"residualMeters":9.378119819007915e-9},{"id":"anchor_1773634963751_2","x":1262.606757271923,"y":1980.756188172822,"lat":37.1127690268462,"lng":111.7969144820659,"residualMeters":3.1402153286256986e-8},{"id":"anchor_1773634963751_3","x":1422.8255872781065,"y":2067.915231696186,"lat":37.112508413845674,"lng":111.79730845496691,"residualMeters":3.194565216780858e-8}],"affineMatrix":{"A":-5.927132636213129e-7,"B":-0.0000019005391587029186,"C":37.117281895317646,"D":0.000003139591220141215,"E":-0.0000012511464917361326,"F":111.79542862913233},"registration":{"ready":true,"rmsMeters":2.642327922356763e-8,"residualMaxMeters":3.194565216780858e-8,"anchorCount":3}},"projects":[{"id":"proj_1771848704754","name":"默认一层","boundaryId":"region_1772294302822","regions":[{"id":"region_1772294302822","name":"boundary_1","type":"boundary","geometry":{"kind":"polygon","outerRing":[{"x":1207.329519492711,"y":1808.398631277995},{"x":1148.219109998919,"y":1908.016174181238},{"x":1261.0389778652425,"y":1979.4287501179},{"x":1259.2441213765967,"y":2065.9781911732725},{"x":1423.2314609712823,"y":2069.744684838875},{"x":1423.2314609712823,"y":2009.1910559072683},{"x":1622.5658949662359,"y":2006.873213651513},{"x":1622.5658949662359,"y":1894.457864247382},{"x":1411.6422496925059,"y":1894.1681339654126},{"x":1372.5286616266358,"y":1892.7194825555657},{"x":1321.825862281989,"y":1875.6253959193705},{"x":1263.5900756061378,"y":1842.016683210919},{"x":1263.5900756061378,"y":1842.016683210919}],"holes":[]},"props":{"walkable":true},"modelParams":{"height":0.2,"thickness":0,"base_height":0,"color":"#e7e7ee","opacity":0.8,"visible":true,"hasWalls":false,"wallHeight":3,"wallThickness":0.2,"wallColor":"#e5e7eb","doors":[]}},{"id":"region_1772295265260","name":"walkable_2","type":"walkable","geometry":{"kind":"polygon","outerRing":[{"x":1219.5510727467877,"y":1852.7367036437872},{"x":1249.1035615076673,"y":1870.1205205619517},{"x":1230.5608234616252,"y":1901.411391014648},{"x":1201.2980649827148,"y":1885.4762255063304},{"x":1201.2980649827148,"y":1885.1864952243611}],"holes":[]},"props":{"walkable":true},"modelParams":{"height":0.1,"thickness":0,"base_height":0,"color":"#ad0b0b","opacity":0.3,"visible":true,"hasWalls":true,"wallHeight":3,"wallThickness":0.2,"wallColor":"#e5e7eb","doors":[{"id":"door_1772295347866","x":1217.686183238672,"y":1894.4004483189804,"width":3}]}},{"id":"region_1772296111764","name":"walkable_3","type":"walkable","geometry":{"kind":"rect","x":1504.817747736434,"y":1924.7626400466327,"w":59.126673361924304,"h":39.95045497427327},"props":{"walkable":true},"modelParams":{"height":0.1,"thickness":0,"base_height":0,"color":"#4ade80","opacity":0.3,"visible":true,"hasWalls":true,"wallHeight":3,"wallThickness":0.2,"wallColor":"#e5e7eb","doors":[{"id":"door_1772296126228","x":1529.5870298204834,"y":1924.7626400466327,"width":2}]}},{"id":"region_1772358050707","name":"elevator_4","type":"elevator","geometry":{"kind":"rect","x":1587.9589392517785,"y":1978.7346486838512,"w":21.29146382738304,"h":12.056612046831333},"props":{"walkable":true},"modelParams":{"height":3,"thickness":0.5,"base_height":0,"color":"#a855f7","opacity":0.8,"visible":true,"hasWalls":false,"wallHeight":3,"wallThickness":0.2,"wallColor":"#e5e7eb","doors":[]}},{"id":"region_1773635008911_4","name":"department_6","type":"department","geometry":{"kind":"polygon","outerRing":[{"x":1446.8182182502894,"y":1934.184487989552},{"x":1476.7140628663913,"y":1933.3423515214927},{"x":1474.1876534622138,"y":1962.3960596695356},{"x":1444.2918088461117,"y":1959.0275137972988}],"holes":[]},"props":{"walkable":false},"modelParams":{"height":3,"thickness":0.2,"base_height":0,"color":"#cbd5e1","opacity":0.5,"visible":true,"hasWalls":false,"wallHeight":3,"wallThickness":0.2,"wallColor":"#e5e7eb","doors":[]}},{"id":"region_1773635088009_5","name":"department_7","type":"department","geometry":{"kind":"point","x":1465.345220547592,"y":1948.0797397125289},"props":{"walkable":false},"modelParams":{"height":3,"thickness":0.2,"base_height":0,"color":"#cbd5e1","opacity":0.5,"visible":true,"hasWalls":false,"wallHeight":3,"wallThickness":0.2,"wallColor":"#e5e7eb","doors":[]}},{"id":"region_1773644110523_1","name":"department_7","type":"department","geometry":{"kind":"polygon","outerRing":[{"x":1369.9094752680533,"y":1927.162655600671},{"x":1412.0861534228295,"y":1936.8699862870878},{"x":1402.0440871955018,"y":1971.347747000913},{"x":1358.8632024179929,"y":1957.623589823565}],"holes":[[{"x":1373.9263017589844,"y":1933.8573664188896},{"x":1404.0525004409674,"y":1940.552077237108},{"x":1395.3493763772833,"y":1963.6488295599618},{"x":1368.9052686453206,"y":1954.2762344144558},{"x":1368.9052686453206,"y":1953.941498873545}]]},"props":{"walkable":false},"modelParams":{"height":3,"thickness":0.2,"base_height":0,"color":"#cbd5e1","opacity":0.5,"visible":true,"hasWalls":false,"wallHeight":3,"wallThickness":0.2,"wallColor":"#e5e7eb","doors":[]}},{"id":"region_1773644162072_2","name":"department_8","type":"department","geometry":{"kind":"polygon","outerRing":[{"x":1412.0861534228295,"y":1936.8699862870878},{"x":1457.9449225276257,"y":1951.2636145462575},{"x":1437.1913189911486,"y":1986.0761108009935},{"x":1402.0440871955018,"y":1971.347747000913}],"holes":[]},"props":{"walkable":false},"modelParams":{"height":3,"thickness":0.2,"base_height":0,"color":"#cbd5e1","opacity":0.5,"visible":true,"hasWalls":false,"wallHeight":3,"wallThickness":0.2,"wallColor":"#e5e7eb","doors":[]}},{"id":"region_1773644174336_3","name":"department_9","type":"department","geometry":{"kind":"polygon","outerRing":[{"x":1369.9094752680533,"y":1927.162655600671},{"x":1342.7958964542686,"y":1916.7858538324326},{"x":1329.7412103587426,"y":1943.2299615643954},{"x":1358.8632024179929,"y":1957.623589823565}],"holes":[]},"props":{"walkable":false},"modelParams":{"height":3,"thickness":0.2,"base_height":0,"color":"#cbd5e1","opacity":0.5,"visible":true,"hasWalls":false,"wallHeight":3,"wallThickness":0.2,"wallColor":"#e5e7eb","doors":[]}}],"nodes":[{"id":"n1771924218413","x":1230.5110233324724,"y":1879.6949270701705,"label":"房间4","isAuto":false,"minZoom":17},{"id":"n1771924232074","x":1530.192932757994,"y":1944.356427149323,"label":"房间5","isAuto":false,"minZoom":14.3},{"id":"n1771924235782","x":1383.4337365142267,"y":1948.560784661954,"label":"房间7","isAuto":false,"minZoom":17},{"id":"n1771924263792","x":1344.958939658947,"y":2026.6742889740976,"label":"房间10","isAuto":false,"minZoom":18.7},{"id":"n1771924269008","x":1345.290641211811,"y":1992.729398287322,"label":"辅助点","isAuto":true,"minZoom":17},{"id":"n1771924270680","x":1407.7393333113268,"y":1989.57647925706,"label":"辅助点","isAuto":true,"minZoom":17},{"id":"n1771924289016","x":1527.2418508970686,"y":1911.0896562664248,"label":"辅助点","isAuto":true,"minZoom":17},{"id":"n1771924290177","x":1427.9939973089101,"y":1910.5832896664851,"label":"辅助点","isAuto":true,"minZoom":17},{"id":"n1771924291236","x":1428.5003639088497,"y":1956.1562836610476,"label":"辅助点","isAuto":true,"minZoom":17},{"id":"n1771925168435","x":1188.3159419902277,"y":1915.9385065678075,"label":"辅助点","isAuto":true,"minZoom":17},{"id":"n1771925170016","x":1291.317909156037,"y":1966.8672569997912,"label":"辅助点","isAuto":true,"minZoom":17},{"id":"n1771925170663","x":1274.1509146284022,"y":1995.4789145458492,"label":"辅助点","isAuto":true,"minZoom":17},{"id":"n1771925179541","x":1431.515031131722,"y":1993.7622150930858,"label":"辅助点","isAuto":true,"minZoom":17},{"id":"n1772358058117","x":1531.2672102656136,"y":1986.6868821615485,"label":"辅助点","isAuto":true,"minZoom":17},{"id":"n1772358059624","x":1599.502503977468,"y":1985.1477401981233,"label":"辅助点","isAuto":true,"minZoom":17},{"id":"n1773025159223","x":1250.14752696683,"y":1854.9492526448403,"label":"辅助点","isAuto":true,"minZoom":17},{"id":"n1773025162947","x":1347.9547510683171,"y":1900.0021865813521,"label":"辅助点","isAuto":true,"minZoom":17},{"id":"n1773025163671","x":1322.5402755143873,"y":1940.819374592209,"label":"辅助点","isAuto":true,"minZoom":17}],"edges":[{"source":"n1771924263792","target":"n1771924269008"},{"source":"n1771924269008","target":"n1771924270680"},{"source":"n1771924232074","target":"n1771924289016"},{"source":"n1771924289016","target":"n1771924290177"},{"source":"n1771924290177","target":"n1771924291236"},{"source":"n1771924218413","target":"n1771925168435"},{"source":"n1771925168435","target":"n1771925170016"},{"source":"n1771925170016","target":"n1771925170663"},{"source":"n1771925170663","target":"n1771924269008"},{"source":"n1771924291236","target":"n1771924235782"},{"source":"n1771924270680","target":"n1771925179541"},{"source":"n1771925179541","target":"n1771924291236"},{"source":"n1771924232074","target":"n1772358058117"},{"source":"n1772358058117","target":"n1772358059624"},{"source":"n1771924218413","target":"n1773025159223"},{"source":"n1773025159223","target":"n1773025162947"},{"source":"n1773025162947","target":"n1773025163671"},{"source":"n1773025163671","target":"n1771924235782"}],"routeNodes":["n1771924218413","n1773025159223","n1773025162947","n1773025163671","n1771924235782","n1771924291236","n1771924290177","n1771924289016","n1771924232074"],"routeLocked":false,"elevation":0},{"id":"proj_1771988639374","name":"二层","boundaryId":"region_1771988676260","regions":[{"id":"region_1771988676260","name":"boundary_1","type":"boundary","geometry":{"kind":"polygon","outerRing":[{"x":1358.4557637868998,"y":1886.0153815724718},{"x":1370.3087879959794,"y":2020.3496559420405},{"x":1609.3447762124174,"y":2002.570119628421},{"x":1609.3447762124174,"y":1893.9173977118583},{"x":1461.1819735989227,"y":1886.0153815724718},{"x":1461.1819735989227,"y":1886.0153815724718}],"holes":[]},"props":{"walkable":true},"modelParams":{"height":0.2,"thickness":0,"base_height":0,"color":"#2a2a3e","opacity":0.8,"visible":true,"hasWalls":false,"wallHeight":3,"wallThickness":0.2,"wallColor":"#e5e7eb","doors":[]}},{"id":"region_1772358072881","name":"elevator_3","type":"elevator","geometry":{"kind":"rect","x":1376.3269192808016,"y":1903.5732161365831,"w":23.08712945137927,"h":14.621848652540166},"props":{"walkable":true},"modelParams":{"height":3,"thickness":0.5,"base_height":0,"color":"#a855f7","opacity":0.8,"visible":true,"hasWalls":false,"wallHeight":3,"wallThickness":0.2,"wallColor":"#e5e7eb","doors":[]}},{"id":"region_1772358121579","name":"elevator_4","type":"elevator","geometry":{"kind":"point","x":1388.1270076670621,"y":1912.5515442565638},"props":{"walkable":true},"modelParams":{"height":3,"thickness":0.5,"base_height":0,"color":"#a855f7","opacity":0.8,"visible":true,"hasWalls":false,"wallHeight":3,"wallThickness":0.2,"wallColor":"#e5e7eb","doors":[]}},{"id":"region_1772358149732","name":"walkable_4","type":"walkable","geometry":{"kind":"rect","x":1484.0668567205716,"y":1930.7647241570965,"w":50.79168479303439,"h":41.30030935191189},"props":{"walkable":true},"modelParams":{"height":0.1,"thickness":0,"base_height":0,"color":"#4ade80","opacity":0.3,"visible":true,"hasWalls":true,"wallHeight":3,"wallThickness":0.2,"wallColor":"#e5e7eb","doors":[{"id":"door_1772358166004","x":1484.0668567205716,"y":1950.7735696816253,"width":2}]}}],"nodes":[{"id":"n1772358077045","x":1388.1270076670621,"y":1912.0384969354222,"label":"辅助点","isAuto":true,"minZoom":17},{"id":"n1772358078142","x":1388.383531327633,"y":1956.4170902141846,"label":"辅助点","isAuto":true,"minZoom":17},{"id":"n1772358097687","x":1508.9496517959471,"y":1949.2344277181999,"label":"2楼门诊","isAuto":false,"minZoom":17}],"edges":[{"source":"n1772358077045","target":"n1772358078142"},{"source":"n1772358078142","target":"n1772358097687"}],"routeNodes":[],"routeLocked":false,"elevation":4}]};
+        const COORD_SYSTEM_GCJ02 = 'GCJ02';
+        const COORD_SYSTEM_WGS84_LEGACY = 'WGS84_MAPBOX_LEGACY';
+        const DEFAULT_BASEMAP_STYLE = 'gaodeRoad';
+        const DEFAULT_GLYPHS_URL = 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf';
+        const BASEMAP_STYLE_PRESETS = {
+            gaodeRoad: {
+                label: '高德路网',
+                background: '#f3f4f6',
+                attribution: 'Contains map data © AutoNavi',
+                tiles: [
+                    'https://webrd01.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=7&x={x}&y={y}&z={z}',
+                    'https://webrd02.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=7&x={x}&y={y}&z={z}',
+                    'https://webrd03.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=7&x={x}&y={y}&z={z}',
+                    'https://webrd04.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=7&x={x}&y={y}&z={z}'
+                ]
+            },
+            gaodeSatellite: {
+                label: '高德影像',
+                background: '#dbeafe',
+                attribution: 'Contains map data © AutoNavi',
+                tiles: [
+                    'https://webst01.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}',
+                    'https://webst02.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}',
+                    'https://webst03.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}',
+                    'https://webst04.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}'
+                ]
+            },
+            blankNeutral: {
+                label: '纯净浅色底板',
+                background: '#e5e7eb',
+                tiles: []
+            }
+        };
+
+        function normalizeCoordSystem(value) {
+            return value === COORD_SYSTEM_GCJ02 ? COORD_SYSTEM_GCJ02 : COORD_SYSTEM_WGS84_LEGACY;
+        }
+        function normalizeBasemapStyleKey(styleKey) {
+            if (styleKey && BASEMAP_STYLE_PRESETS[styleKey]) return styleKey;
+            const raw = String(styleKey || '').toLowerCase();
+            if (raw.includes('satellite')) return 'gaodeSatellite';
+            if (raw.includes('blank') || raw.includes('plain')) return 'blankNeutral';
+            return DEFAULT_BASEMAP_STYLE;
+        }
+        function cloneAffineMatrix(matrix) {
+            if (!matrix) return null;
+            return {
+                A: Number(matrix.A) || 0,
+                B: Number(matrix.B) || 0,
+                C: Number(matrix.C) || 0,
+                D: Number(matrix.D) || 0,
+                E: Number(matrix.E) || 0,
+                F: Number(matrix.F) || 0
+            };
+        }
+        function buildBasemapStyle(styleKey) {
+            const preset = BASEMAP_STYLE_PRESETS[normalizeBasemapStyleKey(styleKey)] || BASEMAP_STYLE_PRESETS[DEFAULT_BASEMAP_STYLE];
+            const style = {
+                version: 8,
+                glyphs: DEFAULT_GLYPHS_URL,
+                sources: {},
+                layers: [
+                    { id: 'basemap-background', type: 'background', paint: { 'background-color': preset.background || '#e5e7eb' } }
+                ]
+            };
+            if (Array.isArray(preset.tiles) && preset.tiles.length > 0) {
+                style.sources['basemap-raster'] = { type: 'raster', tiles: preset.tiles, tileSize: 256, attribution: preset.attribution || '' };
+                style.layers.push({ id: 'basemap-raster', type: 'raster', source: 'basemap-raster', minzoom: 0, maxzoom: 22 });
+            }
+            return style;
+        }
+        function applyMapFog(map, enabled) {
+            if (!map || typeof map.setFog !== 'function') return;
+            if (enabled) map.setFog({ 'color': 'rgb(243, 244, 246)', 'high-color': 'rgb(255, 255, 255)', 'horizon-blend': 0.05 });
+            else map.setFog(null);
+        }
+        function outOfChina(lng, lat) {
+            return lng < 72.004 || lng > 137.8347 || lat < 0.8293 || lat > 55.8271;
+        }
+        function transformLat(lng, lat) {
+            let ret = -100.0 + 2.0 * lng + 3.0 * lat + 0.2 * lat * lat + 0.1 * lng * lat + 0.2 * Math.sqrt(Math.abs(lng));
+            ret += (20.0 * Math.sin(6.0 * lng * Math.PI) + 20.0 * Math.sin(2.0 * lng * Math.PI)) * 2.0 / 3.0;
+            ret += (20.0 * Math.sin(lat * Math.PI) + 40.0 * Math.sin(lat / 3.0 * Math.PI)) * 2.0 / 3.0;
+            ret += (160.0 * Math.sin(lat / 12.0 * Math.PI) + 320 * Math.sin(lat * Math.PI / 30.0)) * 2.0 / 3.0;
+            return ret;
+        }
+        function transformLng(lng, lat) {
+            let ret = 300.0 + lng + 2.0 * lat + 0.1 * lng * lng + 0.1 * lng * lat + 0.1 * Math.sqrt(Math.abs(lng));
+            ret += (20.0 * Math.sin(6.0 * lng * Math.PI) + 20.0 * Math.sin(2.0 * lng * Math.PI)) * 2.0 / 3.0;
+            ret += (20.0 * Math.sin(lng * Math.PI) + 40.0 * Math.sin(lng / 3.0 * Math.PI)) * 2.0 / 3.0;
+            ret += (150.0 * Math.sin(lng / 12.0 * Math.PI) + 300.0 * Math.sin(lng / 30.0 * Math.PI)) * 2.0 / 3.0;
+            return ret;
+        }
+        function wgs84ToGcj02(lng, lat) {
+            if (outOfChina(lng, lat)) return [lng, lat];
+            const a = 6378245.0;
+            const ee = 0.00669342162296594323;
+            let dLat = transformLat(lng - 105.0, lat - 35.0);
+            let dLng = transformLng(lng - 105.0, lat - 35.0);
+            const radLat = lat / 180.0 * Math.PI;
+            let magic = Math.sin(radLat);
+            magic = 1 - ee * magic * magic;
+            const sqrtMagic = Math.sqrt(magic);
+            dLat = (dLat * 180.0) / ((a * (1 - ee)) / (magic * sqrtMagic) * Math.PI);
+            dLng = (dLng * 180.0) / (a / sqrtMagic * Math.cos(radLat) * Math.PI);
+            return [lng + dLng, lat + dLat];
+        }
+        function cloneAnchor(anchor) {
+            return {
+                id: anchor && anchor.id ? anchor.id : '',
+                x: Number(anchor?.x) || 0,
+                y: Number(anchor?.y) || 0,
+                lat: Number(anchor?.lat) || 0,
+                lng: Number(anchor?.lng) || 0,
+                residualMeters: Number(anchor?.residualMeters) || 0
+            };
+        }
+        function solve3x3System(matrix, vector) {
+            const m = matrix.map(row => row.slice());
+            const v = vector.slice();
+            for (let col = 0; col < 3; col++) {
+                let pivotRow = col;
+                for (let row = col + 1; row < 3; row++) {
+                    if (Math.abs(m[row][col]) > Math.abs(m[pivotRow][col])) pivotRow = row;
+                }
+                if (Math.abs(m[pivotRow][col]) < 1e-9) return null;
+                if (pivotRow !== col) {
+                    [m[col], m[pivotRow]] = [m[pivotRow], m[col]];
+                    [v[col], v[pivotRow]] = [v[pivotRow], v[col]];
+                }
+                const pivot = m[col][col];
+                for (let k = col; k < 3; k++) m[col][k] /= pivot;
+                v[col] /= pivot;
+                for (let row = 0; row < 3; row++) {
+                    if (row === col) continue;
+                    const factor = m[row][col];
+                    for (let k = col; k < 3; k++) m[row][k] -= factor * m[col][k];
+                    v[row] -= factor * v[col];
+                }
+            }
+            return v;
+        }
+        function solveAffineAxis(anchors, key) {
+            const normal = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+            const rhs = [0, 0, 0];
+            anchors.forEach(anchor => {
+                const x = Number(anchor.x);
+                const y = Number(anchor.y);
+                const value = Number(anchor[key]);
+                normal[0][0] += x * x;
+                normal[0][1] += x * y;
+                normal[0][2] += x;
+                normal[1][0] += x * y;
+                normal[1][1] += y * y;
+                normal[1][2] += y;
+                normal[2][0] += x;
+                normal[2][1] += y;
+                normal[2][2] += 1;
+                rhs[0] += x * value;
+                rhs[1] += y * value;
+                rhs[2] += value;
+            });
+            const solution = solve3x3System(normal, rhs);
+            if (!solution) return null;
+            return { a: solution[0], b: solution[1], c: solution[2] };
+        }
+        function calculateAffineMatrixFromAnchors(anchors) {
+            if (!Array.isArray(anchors) || anchors.length < 3) return null;
+            const latAxis = solveAffineAxis(anchors, 'lat');
+            const lngAxis = solveAffineAxis(anchors, 'lng');
+            if (!latAxis || !lngAxis) return null;
+            return { A: latAxis.a, B: latAxis.b, C: latAxis.c, D: lngAxis.a, E: lngAxis.b, F: lngAxis.c };
+        }
+        function getRuntimeGlobalConfig(globalConfig) {
+            const coordSystem = normalizeCoordSystem(globalConfig?.coordSystem);
+            const anchors = Array.isArray(globalConfig?.anchors) ? globalConfig.anchors.map(cloneAnchor) : [];
+            const runtimeAnchors = coordSystem === COORD_SYSTEM_GCJ02
+                ? anchors
+                : anchors.map(anchor => {
+                    const converted = cloneAnchor(anchor);
+                    const gcj = wgs84ToGcj02(converted.lng, converted.lat);
+                    converted.lng = gcj[0];
+                    converted.lat = gcj[1];
+                    return converted;
+                });
+            return {
+                coordSystem: COORD_SYSTEM_GCJ02,
+                anchors: runtimeAnchors,
+                affineMatrix: coordSystem === COORD_SYSTEM_GCJ02
+                    ? cloneAffineMatrix(globalConfig?.affineMatrix) || calculateAffineMatrixFromAnchors(runtimeAnchors)
+                    : calculateAffineMatrixFromAnchors(runtimeAnchors),
+                registration: globalConfig?.registration || {}
+            };
+        }
+
+        MAP_DATA.global = getRuntimeGlobalConfig(MAP_DATA.global || {});
+        
+        let map;
+        let displayFloor = 'ALL';
+        const layerId = 'indoor-extrusion';
+        
+        // 🌟 独立 H5 状态机
+        const viewerState = {
+            selectedNode: null, navStartNode: null, navEndNode: null, smoothedRoute: [], targetProj: null, startProj: null,
+            simulation: { active: false, progress: 0, speed: 1.2 * 30, lastTime: 0, totalDist: 0, segments: [], currentLngLat: null, currentMapAngle: 0, arrowSize: 0.8, arrowColor: '#4f46e5', passedCoords: [], upcomingCoords: [] },
+            navPoiMarkers: { start: null, end: null },
+            currentStyle: DEFAULT_BASEMAP_STYLE
+        };
+        let routeCanvas = null;
+        let routeCtx = null;
+        const routeStyle = {
+            pathColor: '#4A90E2',
+            pathWidth: 20,
+            arrowColor: '#FFFFFF',
+            arrowSize: 12,
+            arrowSpacing: 40,
+            animationSpeed: 1.5
+        };
+        const routeAnim = { offset: 0, frame: 0, inited: false, lastTs: 0 };
+        
+        function pixelToLngLat(x, y) {
+            const m = MAP_DATA.global.affineMatrix;
+            if (!m) return [0, 0];
+            return [ m.D * x + m.E * y + m.F, m.A * x + m.B * y + m.C ];
+        }
+        function cloneRing(ring) {
+            return Array.isArray(ring) ? ring.filter(Boolean).map(point => ({ x: Number(point.x), y: Number(point.y) })) : [];
+        }
+        function normalizePolygonGeometry(geometry) {
+            const outerRing = Array.isArray(geometry.outerRing) ? cloneRing(geometry.outerRing) : cloneRing(geometry.points);
+            const holes = Array.isArray(geometry.holes) ? geometry.holes.map(cloneRing).filter(ring => ring.length >= 3) : [];
+            return { kind: 'polygon', outerRing, holes };
+        }
+        function getRectRing(geometry) {
+            return [
+                { x: geometry.x, y: geometry.y },
+                { x: geometry.x + geometry.w, y: geometry.y },
+                { x: geometry.x + geometry.w, y: geometry.y + geometry.h },
+                { x: geometry.x, y: geometry.y + geometry.h }
+            ];
+        }
+        function getGeometryRings(geometry) {
+            if (!geometry) return [];
+            if (geometry.kind === 'rect') return [getRectRing(geometry)];
+            if (geometry.kind === 'polygon') {
+                const polygon = normalizePolygonGeometry(geometry);
+                return [polygon.outerRing, ...(polygon.holes || [])].filter(ring => ring.length >= 3);
+            }
+            return [];
+        }
+        function geometryToLngLatRings(geometry) {
+            return getGeometryRings(geometry).map(ring => {
+                const points = cloneRing(ring);
+                if (points.length > 0) {
+                    const first = points[0];
+                    const last = points[points.length - 1];
+                    if (first.x !== last.x || first.y !== last.y) points.push({ x: first.x, y: first.y });
+                }
+                return points.map(point => pixelToLngLat(point.x, point.y));
+            });
+        }
+
+        function getActiveUpcomingCoords() {
+            if (viewerState.simulation.active && viewerState.simulation.upcomingCoords && viewerState.simulation.upcomingCoords.length > 1) {
+                return viewerState.simulation.upcomingCoords;
+            }
+            if (viewerState.smoothedRoute && viewerState.smoothedRoute.length > 1) {
+                return viewerState.smoothedRoute.map(p => [p.lng, p.lat]);
+            }
+            return [];
+        }
+
+        function findNodeById(nodeId) {
+            for (const proj of MAP_DATA.projects) {
+                const n = proj.nodes.find(x => x.id === nodeId);
+                if (n) return { node: n, proj };
+            }
+            return null;
+        }
+
+        function removeNavPoiMarker(kind) {
+            const marker = viewerState.navPoiMarkers[kind];
+            if (marker) marker.remove();
+            viewerState.navPoiMarkers[kind] = null;
+        }
+
+        function buildNavPoiMarkerElement(kind, name) {
+            const isStart = kind === 'start';
+            const color = isStart ? '#3B82F6' : '#DC2626';
+            const roleText = isStart ? '起点' : '终点';
+            const keyText = isStart ? '起' : '终';
+
+            const el = document.createElement('div');
+            el.className = 'nav-poi-marker';
+
+            const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+            svg.setAttribute('width', '52');
+            svg.setAttribute('height', '56');
+            svg.setAttribute('viewBox', '0 0 52 56');
+
+            const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+            circle.setAttribute('cx', '26');
+            circle.setAttribute('cy', '19');
+            circle.setAttribute('r', '15');
+            circle.setAttribute('fill', color);
+            circle.setAttribute('stroke', '#ffffff');
+            circle.setAttribute('stroke-width', '2.5');
+            svg.appendChild(circle);
+
+            const txt = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+            txt.setAttribute('x', '26');
+            txt.setAttribute('y', '24');
+            txt.setAttribute('text-anchor', 'middle');
+            txt.setAttribute('font-size', '15');
+            txt.setAttribute('font-weight', '700');
+            txt.setAttribute('fill', '#ffffff');
+            txt.textContent = keyText;
+            svg.appendChild(txt);
+
+            const tail = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+            tail.setAttribute('d', 'M26 50 L19 35 L33 35 Z');
+            tail.setAttribute('fill', color);
+            tail.setAttribute('stroke', '#ffffff');
+            tail.setAttribute('stroke-width', '2');
+            svg.appendChild(tail);
+
+            const role = document.createElement('div');
+            role.className = 'nav-poi-role';
+            role.textContent = roleText;
+
+            const poiName = document.createElement('div');
+            poiName.className = 'nav-poi-name';
+            poiName.textContent = name || '未命名';
+
+            el.appendChild(svg);
+            el.appendChild(role);
+            el.appendChild(poiName);
+            return el;
+        }
+
+        function setNavPoiMarker(kind, nodeInfo) {
+            removeNavPoiMarker(kind);
+            if (!map || !nodeInfo || !nodeInfo.node) return;
+            const lngLat = pixelToLngLat(nodeInfo.node.x, nodeInfo.node.y);
+            const markerEl = buildNavPoiMarkerElement(kind, nodeInfo.node.label);
+            viewerState.navPoiMarkers[kind] = new maplibregl.Marker({ element: markerEl, anchor: 'bottom', offset: [0, -4] })
+                .setLngLat(lngLat)
+                .addTo(map);
+        }
+
+        function updateNavPoiMarkers() {
+            const startInfo = viewerState.navStartNode ? findNodeById(viewerState.navStartNode) : null;
+            const endInfo = viewerState.navEndNode ? findNodeById(viewerState.navEndNode) : null;
+            if (startInfo) setNavPoiMarker('start', startInfo); else removeNavPoiMarker('start');
+            if (endInfo) setNavPoiMarker('end', endInfo); else removeNavPoiMarker('end');
+        }
+
+        function resizeRouteCanvas() {
+            if (!routeCanvas || !routeCtx) return;
+            const dpr = window.devicePixelRatio || 1;
+            const w = window.innerWidth;
+            const h = window.innerHeight;
+            routeCanvas.width = Math.floor(w * dpr);
+            routeCanvas.height = Math.floor(h * dpr);
+            routeCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        }
+
+        function getRouteScreenPoints() {
+            if (!map) return [];
+            const coords = getActiveUpcomingCoords();
+            if (coords.length < 2) return [];
+            const points = [];
+            for (let i = 0; i < coords.length; i++) {
+                const p = map.project(coords[i]);
+                if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) continue;
+                points.push({ x: p.x, y: p.y });
+            }
+            return points;
+        }
+
+        function drawRouteArrow(x, y, angle) {
+            routeCtx.save();
+            routeCtx.translate(x, y);
+            routeCtx.rotate(angle);
+            routeCtx.beginPath();
+            routeCtx.moveTo(-routeStyle.arrowSize / 2, -routeStyle.arrowSize / 2);
+            routeCtx.lineTo(0, 0);
+            routeCtx.lineTo(-routeStyle.arrowSize / 2, routeStyle.arrowSize / 2);
+            routeCtx.strokeStyle = routeStyle.arrowColor;
+            routeCtx.lineWidth = 3;
+            routeCtx.lineCap = 'round';
+            routeCtx.stroke();
+            routeCtx.restore();
+        }
+
+        function drawRouteCanvas() {
+            if (!routeCanvas || !routeCtx) return;
+            // 使用像素坐标清空，避免高 DPI/变换状态下出现残影叠画
+            routeCtx.save();
+            routeCtx.setTransform(1, 0, 0, 1, 0, 0);
+            routeCtx.clearRect(0, 0, routeCanvas.width, routeCanvas.height);
+            routeCtx.restore();
+            const pathPoints = getRouteScreenPoints();
+            if (pathPoints.length < 2) {
+                return;
+            }
+
+            routeCtx.beginPath();
+            routeCtx.moveTo(pathPoints[0].x, pathPoints[0].y);
+            for (let i = 1; i < pathPoints.length; i++) {
+                routeCtx.lineTo(pathPoints[i].x, pathPoints[i].y);
+            }
+            routeCtx.lineCap = 'round';
+            routeCtx.lineJoin = 'round';
+            routeCtx.strokeStyle = routeStyle.pathColor;
+            routeCtx.lineWidth = routeStyle.pathWidth;
+            routeCtx.shadowColor = 'rgba(0, 0, 0, 0.2)';
+            routeCtx.shadowBlur = 10;
+            routeCtx.shadowOffsetY = 5;
+            routeCtx.stroke();
+            routeCtx.shadowColor = 'transparent';
+
+            let walkDistance = 0;
+            for (let i = 0; i < pathPoints.length - 1; i++) {
+                const p1 = pathPoints[i];
+                const p2 = pathPoints[i + 1];
+                const dx = p2.x - p1.x;
+                const dy = p2.y - p1.y;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+                const angle = Math.atan2(dy, dx);
+                let nextArrowGlobalPos = Math.ceil((walkDistance - routeAnim.offset) / routeStyle.arrowSpacing) * routeStyle.arrowSpacing + routeAnim.offset;
+                while (nextArrowGlobalPos < walkDistance + dist) {
+                    if (nextArrowGlobalPos >= walkDistance) {
+                        const localDist = nextArrowGlobalPos - walkDistance;
+                        const arrowX = p1.x + Math.cos(angle) * localDist;
+                        const arrowY = p1.y + Math.sin(angle) * localDist;
+                        drawRouteArrow(arrowX, arrowY, angle);
+                    }
+                    nextArrowGlobalPos += routeStyle.arrowSpacing;
+                }
+                walkDistance += dist;
+            }
+        }
+
+        function routeCanvasLoop() {
+            const now = performance.now();
+            const dt = routeAnim.lastTs ? Math.min(0.05, (now - routeAnim.lastTs) / 1000) : (1 / 60);
+            routeAnim.lastTs = now;
+            routeAnim.offset += routeStyle.animationSpeed * dt * 60;
+            if (routeAnim.offset >= routeStyle.arrowSpacing) routeAnim.offset = 0;
+            drawRouteCanvas();
+            routeAnim.frame = requestAnimationFrame(routeCanvasLoop);
+        }
+
+        function initRouteCanvas() {
+            routeCanvas = document.getElementById('routeCanvas');
+            if (!routeCanvas) return;
+            routeCtx = routeCanvas.getContext('2d');
+            resizeRouteCanvas();
+            if (!routeAnim.inited) {
+                window.addEventListener('resize', resizeRouteCanvas);
+                routeAnim.inited = true;
+            }
+            if (routeAnim.frame) cancelAnimationFrame(routeAnim.frame);
+            routeAnim.offset = 0;
+            routeAnim.lastTs = 0;
+            routeAnim.frame = requestAnimationFrame(routeCanvasLoop);
+        }
+
+        function createWallPolygons(coords, thickness, centerLat, doorsPixel) {
+            const walls = [];
+            const degPerMeterLat = 1 / 111320;
+            const degPerMeterLng = 1 / (111320 * Math.cos(centerLat * Math.PI / 180));
+            if(!coords || coords.length === 0) return walls;
+
+            const doors = (doorsPixel || []).map(d => {
+                const ll = pixelToLngLat(d.x, d.y);
+                return { lng: ll[0], lat: ll[1], width: d.width || 1.5 };
+            });
+
+            coords.forEach(ring => {
+                if (!ring || ring.length < 2) return;
+                for(let i=0; i<ring.length-1; i++) {
+                    const p1 = ring[i], p2 = ring[i+1];
+                    const dx = p2[0] - p1[0], dy = p2[1] - p1[1];
+                    const len = Math.sqrt(dx*dx + dy*dy);
+                    if(len === 0) continue;
+
+                    const lenMeters = Math.sqrt( Math.pow(dx / degPerMeterLng, 2) + Math.pow(dy / degPerMeterLat, 2) );
+                    const cutIntervals = [];
+
+                    doors.forEach(door => {
+                        const A = door.lng - p1[0], B = door.lat - p1[1];
+                        let t = (A * dx + B * dy) / (len * len);
+                        const projX = p1[0] + t * dx, projY = p1[1] + t * dy;
+                        const distToSegMeters = Math.sqrt( Math.pow((door.lng - projX)/degPerMeterLng, 2) + Math.pow((door.lat - projY)/degPerMeterLat, 2) );
+                        if (t > -0.1 && t < 1.1 && distToSegMeters < 1.0) {
+                            const widthFrac = door.width / lenMeters;
+                            cutIntervals.push([t - widthFrac/2, t + widthFrac/2]);
+                        }
+                    });
+
+                    let keepIntervals = []; cutIntervals.sort((a,b) => a[0] - b[0]); let current = 0;
+                    for(let cut of cutIntervals) {
+                        if (cut[0] > current) keepIntervals.push([Math.max(0, current), Math.min(1, cut[0])]);
+                        current = Math.max(current, cut[1]);
+                    }
+                    if (current < 1) keepIntervals.push([Math.max(0, current), 1]);
+
+                    const nx = -dy / len, ny = dx / len;
+                    const ox = nx * (thickness / 2) * degPerMeterLng, oy = ny * (thickness / 2) * degPerMeterLat;
+
+                    keepIntervals.forEach(interval => {
+                        if (interval[1] - interval[0] < 0.001) return; 
+                        const sp = [ p1[0] + interval[0]*dx, p1[1] + interval[0]*dy ];
+                        const ep = [ p1[0] + interval[1]*dx, p1[1] + interval[1]*dy ];
+                        walls.push([[ [sp[0] + ox, sp[1] + oy], [ep[0] + ox, ep[1] + oy], [ep[0] - ox, ep[1] - oy], [sp[0] - ox, sp[1] - oy], [sp[0] + ox, sp[1] + oy] ]]);
+                    });
+                }
+            });
+            return walls;
+        }
+
+        function buildGeoJSON() {
+            let allFeatures = []; let allNodeFeatures = [];
+            MAP_DATA.projects.forEach(proj => {
+                const elev = proj.elevation || 0;
+                proj.regions.filter(r => r.modelParams && r.modelParams.visible !== false).forEach(r => {
+                    let coords = []; 
+                    if (r.geometry.kind === 'rect' || r.geometry.kind === 'polygon') { coords = geometryToLngLatRings(r.geometry); }
+                    if(coords.length > 0) {
+                        if (r.modelParams.hasWalls) {
+                            allFeatures.push({ type: 'Feature', properties: { projectId: proj.id, height: (r.modelParams.height || 0.1) + elev, base_height: (r.modelParams.base_height || 0) + elev, color: r.modelParams.color || '#cccccc' }, geometry: { type: 'Polygon', coordinates: coords } });
+                            const centerLat = coords[0][0][1];
+                            const wallCoordsList = createWallPolygons(coords, r.modelParams.wallThickness || 0.2, centerLat, r.modelParams.doors);
+                            wallCoordsList.forEach(wallCoords => {
+                                allFeatures.push({ type: 'Feature', properties: { projectId: proj.id, height: (r.modelParams.wallHeight || 3.0) + elev, base_height: (r.modelParams.base_height || 0) + elev, color: r.modelParams.wallColor || '#e5e7eb' }, geometry: { type: 'Polygon', coordinates: wallCoords } });
+                            });
+                        } else {
+                            allFeatures.push({ type: 'Feature', properties: { projectId: proj.id, height: (r.modelParams.height || 3) + elev, base_height: (r.modelParams.base_height || 0) + elev, color: r.modelParams.color || '#cccccc' }, geometry: { type: 'Polygon', coordinates: coords } });
+                        }
+                    }
+                });
+                
+                proj.nodes.filter(n => !n.isAuto).forEach(n => {
+                    let navState = 'none';
+                    if (n.id === viewerState.navStartNode) navState = 'start';
+                    else if (n.id === viewerState.navEndNode) navState = 'end';
+                    else if (viewerState.selectedNode && n.id === viewerState.selectedNode.id) navState = 'selected';
+                    
+                    allNodeFeatures.push({
+                        type: 'Feature',
+                        properties: { projectId: proj.id, id: n.id, label: n.label || '', minZoom: n.minZoom !== undefined ? n.minZoom : 17.0, navState: navState, elevation: elev, projName: proj.name },
+                        geometry: { type: 'Point', coordinates: pixelToLngLat(n.x, n.y) }
+                    });
+                });
+            });
+            return { models: { type: 'FeatureCollection', features: allFeatures }, nodes: { type: 'FeatureCollection', features: allNodeFeatures } };
+        }
+
+        function initMap() {
+            const center = MAP_DATA.global.anchors && MAP_DATA.global.anchors.length > 0 ? [MAP_DATA.global.anchors[0].lng, MAP_DATA.global.anchors[0].lat] : [116.3974, 39.9090];
+            // 默认手机端更平缓的视角
+            map = new maplibregl.Map({ container: 'map3d', style: buildBasemapStyle(viewerState.currentStyle), center: center, zoom: 18, pitch: 45, bearing: 0, antialias: true });
+
+            map.on('style.load', () => {
+                const geoData = buildGeoJSON();
+                map.addSource('indoor-models', { type: 'geojson', data: geoData.models });
+                map.addLayer({ 'id': layerId, 'type': 'fill-extrusion', 'source': 'indoor-models', 'paint': { 'fill-extrusion-color': ['get', 'color'], 'fill-extrusion-height': ['get', 'height'], 'fill-extrusion-base': ['get', 'base_height'], 'fill-extrusion-opacity': 0.95 } });
+
+                map.addSource('indoor-nodes', { type: 'geojson', data: geoData.nodes });
+                
+                // 更像图钉的外圈和内圈设计
+                map.addLayer({
+                    'id': 'indoor-nodes-circle-outer', 'type': 'circle', 'source': 'indoor-nodes',
+                    'paint': {
+                        'circle-radius': ['interpolate', ['linear'], ['zoom'],
+                            17, ['match', ['get', 'navState'], 'start', 11, 'end', 11, 'selected', 10, 5],
+                            20, ['match', ['get', 'navState'], 'start', 17, 'end', 17, 'selected', 15, 7]
+                        ],
+                        'circle-color': ['match', ['get', 'navState'], 'start', 'rgba(34, 197, 94, 0.35)', 'end', 'rgba(239, 68, 68, 0.35)', 'selected', 'rgba(59, 130, 246, 0.25)', 'rgba(156, 163, 175, 0.15)'],
+                        'circle-blur': 0.55
+                    }
+                });
+                map.addLayer({
+                    'id': 'indoor-nodes-circle', 'type': 'circle', 'source': 'indoor-nodes',
+                    'paint': {
+                        'circle-radius': ['interpolate', ['linear'], ['zoom'],
+                            17, ['match', ['get', 'navState'], 'start', 6, 'end', 6, 'selected', 5, 3],
+                            20, ['match', ['get', 'navState'], 'start', 9, 'end', 9, 'selected', 8, 4.5]
+                        ],
+                        'circle-color': ['match', ['get', 'navState'], 'start', '#22c55e', 'end', '#ef4444', 'selected', '#3b82f6', '#9ca3af'],
+                        'circle-stroke-width': 2.5, 'circle-stroke-color': '#ffffff'
+                    }
+                });
+                map.addLayer({ 
+                    'id': 'indoor-nodes-label', 'type': 'symbol', 'source': 'indoor-nodes', 
+                    'layout': { 'text-field': ['get', 'label'], 'text-anchor': 'bottom', 'text-offset': [0, -0.8], 'text-size': 13, 'text-allow-overlap': true }, 
+                    'paint': { 'text-color': '#1f2937', 'text-halo-color': '#ffffff', 'text-halo-width': 2.5 } 
+                });
+                
+                updateMapboxRouteLayer();
+                updateMapboxSimLayer();
+                updateFilters();
+                renderUI();
+                initRouteCanvas();
+                updateNavPoiMarkers();
+                
+                applyMapFog(map, true);
+            });
+
+            map.on('zoom', updateFilters);
+            map.on('rotate', () => { const compass = document.getElementById('compassIcon'); if (compass) compass.style.transform = `rotate(${-map.getBearing()}deg)`; });
+
+            // 🎯 核心交互：点击地图节点唤起底部抽屉
+            const handleNodeClick = (e) => {
+                if (viewerState.simulation.active) return;
+                const props = e.features[0].properties;
+                if (!props || !props.id) return;
+                
+                viewerState.selectedNode = props;
+                updateNodeStyles();
+                renderBottomSheet(); // 弹出抽屉
+                
+                // 聚焦该点
+                map.easeTo({ center: e.lngLat, offset: [0, 100], duration: 500 }); 
+            };
+            
+            map.on('click', 'indoor-nodes-circle', handleNodeClick);
+            map.on('click', 'indoor-nodes-label', handleNodeClick);
+        }
+
+        // 🌟 动态渲染底层抽屉 UI
+        function renderBottomSheet() {
+            const sheet = document.getElementById('bottomSheet');
+            const content = document.getElementById('bottomSheetContent');
+            
+            if (viewerState.simulation.active) {
+                sheet.classList.replace('sheet-visible', 'sheet-hidden');
+                return;
+            }
+
+            // 状态 2: 路线规划成功
+            if (viewerState.navStartNode && viewerState.navEndNode && viewerState.smoothedRoute.length > 0) {
+                const dist = Math.round(viewerState.simulation.totalDist || 0);
+                const time = Math.max(1, Math.ceil(dist / 1.2 / 60));
+                
+                let startName = "起点", endName = "终点";
+                MAP_DATA.projects.forEach(p => p.nodes.forEach(n => {
+                    if(n.id === viewerState.navStartNode) startName = n.label;
+                    if(n.id === viewerState.navEndNode) endName = n.label;
+                }));
+
+                content.innerHTML = `
+                    <div class="flex justify-between items-center mb-5">
+                        <div class="flex flex-col gap-1 w-full pr-4">
+                            <div class="flex items-center gap-2 text-sm font-bold text-gray-700">
+                                <span class="w-2 h-2 rounded-full bg-green-500"></span> ${startName}
+                            </div>
+                            <div class="w-0.5 h-3 bg-gray-200 ml-1"></div>
+                            <div class="flex items-center gap-2 text-sm font-bold text-gray-700">
+                                <span class="w-2 h-2 rounded-full bg-red-500"></span> ${endName}
+                            </div>
+                        </div>
+                        <button onclick="clearRoute()" class="text-xs text-blue-600 bg-blue-50 px-3 py-1.5 rounded-full shrink-0">重新选择</button>
+                    </div>
+                    <div class="flex items-baseline gap-2 mb-4">
+                        <span class="text-3xl font-extrabold text-gray-900">${time}</span>
+                        <span class="text-sm text-gray-500 font-medium">分钟</span>
+                        <span class="text-sm text-gray-300 mx-1">|</span>
+                        <span class="text-sm text-gray-500 font-medium">步行 ${dist} 米</span>
+                    </div>
+                    <button onclick="startSimulation()" class="w-full bg-blue-600 text-white font-bold text-[17px] py-3.5 rounded-2xl shadow-lg shadow-blue-200 active:scale-95 transition-transform">开始导航</button>
+                `;
+                sheet.classList.replace('sheet-hidden', 'sheet-visible');
+            } 
+            // 状态 1: 点击了某个节点 (单点详情)
+            else if (viewerState.selectedNode) {
+                const n = viewerState.selectedNode;
+                const isStart = viewerState.navStartNode === n.id;
+                const isEnd = viewerState.navEndNode === n.id;
+                
+                content.innerHTML = `
+                    <h3 class="text-2xl font-bold text-gray-800 mb-1">${n.label}</h3>
+                    <p class="text-sm text-gray-500 mb-6 flex items-center gap-1">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"></path></svg>
+                        所在区域: ${n.projName || '当前楼层'}
+                    </p>
+                    <div class="flex gap-3">
+                        <button onclick="setAsStart('${n.id}')" class="flex-1 ${isStart ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-700'} font-bold py-3.5 rounded-2xl active:scale-95 transition-all">${isStart ? '已设为起点' : '设为起点'}</button>
+                        <button onclick="setAsEnd('${n.id}')" class="flex-1 ${isEnd ? 'bg-red-100 text-red-700' : 'bg-blue-600 text-white shadow-lg shadow-blue-200'} font-bold py-3.5 rounded-2xl active:scale-95 transition-all">${isEnd ? '已设为终点' : '去这里'}</button>
+                    </div>
+                `;
+                sheet.classList.replace('sheet-hidden', 'sheet-visible');
+            } else {
+                // 状态 0: 收起
+                sheet.classList.replace('sheet-visible', 'sheet-hidden');
+            }
+        }
+
+        window.setAsStart = function(id) {
+            viewerState.navStartNode = id;
+            if(viewerState.navEndNode === id) viewerState.navEndNode = null;
+            checkAndPlanRoute();
+        }
+        window.setAsEnd = function(id) {
+            viewerState.navEndNode = id;
+            if(viewerState.navStartNode === id) viewerState.navStartNode = null;
+            checkAndPlanRoute();
+        }
+
+        function checkAndPlanRoute() {
+            updateNodeStyles();
+            updateNavPoiMarkers();
+            if (viewerState.navStartNode && viewerState.navEndNode) {
+                planRoute();
+            } else {
+                renderBottomSheet();
+            }
+        }
+
+        function updateNodeStyles() {
+            if(!map || !map.getSource('indoor-nodes')) return;
+            map.getSource('indoor-nodes').setData(buildGeoJSON().nodes);
+        }
+
+        function updateFilters() {
+            if(!map || !map.isStyleLoaded()) return;
+            const currentZoom = map.getZoom();
+            const filterProj = displayFloor === 'ALL' ? null : ['==', ['get', 'projectId'], displayFloor];
+            
+            if(map.getLayer(layerId)) map.setFilter(layerId, filterProj);
+            
+            const zoomFilter = ['<=', ['get', 'minZoom'], currentZoom];
+            const combinedNodeFilter = filterProj ? ['all', filterProj, zoomFilter] : zoomFilter;
+            
+            if (map.getLayer('indoor-nodes-circle-outer')) map.setFilter('indoor-nodes-circle-outer', combinedNodeFilter);
+            if (map.getLayer('indoor-nodes-circle')) map.setFilter('indoor-nodes-circle', combinedNodeFilter);
+            if (map.getLayer('indoor-nodes-label')) map.setFilter('indoor-nodes-label', combinedNodeFilter);
+            if (map.getLayer('indoor-sim-marker')) map.setFilter('indoor-sim-marker', filterProj);
+            drawRouteCanvas();
+        }
+
+        window.switchFloor = function(id) {
+            displayFloor = id; updateFilters(); renderUI();
+            if (id === 'ALL' && MAP_DATA.global.anchors.length > 0) map.easeTo({ pitch: 45, zoom: 17.5, duration: 1500 });
+            else if (MAP_DATA.global.anchors.length > 0) map.easeTo({ pitch: 55, zoom: 19, duration: 1000 });
+        }
+
+        function renderUI() {
+            const dropdown = document.getElementById('floorDropdown');
+            const btn = document.getElementById('currentFloorBtn');
+            if(!dropdown || !btn) return;
+
+            let curName = "ALL";
+            if (displayFloor !== 'ALL') {
+                const p = MAP_DATA.projects.find(x => x.id === displayFloor);
+                if(p) curName = p.name.substring(0,4);
+            }
+            btn.innerHTML = `${curName} <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>`;
+
+            let html = `<div onclick="switchFloor('ALL')" class="px-4 py-3 text-sm font-bold cursor-pointer hover:bg-blue-50 ${displayFloor === 'ALL' ? 'text-blue-600 bg-blue-50' : 'text-gray-700'}">ALL 楼层</div>`;
+            MAP_DATA.projects.slice().reverse().forEach(p => {
+                html += `<div onclick="switchFloor('${p.id}')" class="px-4 py-3 text-sm font-bold cursor-pointer border-t border-gray-100 hover:bg-blue-50 ${displayFloor === p.id ? 'text-blue-600 bg-blue-50' : 'text-gray-700'}">${p.name}</div>`;
+            });
+            dropdown.innerHTML = html;
+        }
+
+        window.resetCompass = function() { if(map) map.easeTo({ bearing: 0, pitch: 45, duration: 800 }); };
+
+        window.handlePoiSearch = function(val) {
+            const resultsDiv = document.getElementById('poiSearchResults');
+            if (!val.trim()) { resultsDiv.classList.add('hidden'); return; }
+            
+            let matches = [];
+            const searchFloor = displayFloor === 'ALL' ? MAP_DATA.projects : MAP_DATA.projects.filter(p => p.id === displayFloor);
+            searchFloor.forEach(p => {
+                const m = p.nodes.filter(n => !n.isAuto && n.label && n.label.toLowerCase().includes(val.toLowerCase()));
+                m.forEach(n => matches.push({...n, projName: p.name}));
+            });
+            
+            if (matches.length === 0) {
+                resultsDiv.innerHTML = '<div class="px-4 py-4 text-sm text-gray-500 text-center">未找到匹配地点</div>';
+            } else {
+                resultsDiv.innerHTML = matches.map(n => `
+                    <div class="px-5 py-3.5 text-sm text-gray-700 hover:bg-blue-50 cursor-pointer border-b border-gray-50 last:border-0 flex flex-col gap-1" onmousedown="flyToPoi('${n.id}')">
+                        <span class="font-bold text-gray-900">${n.label}</span>
+                        <span class="text-[11px] text-gray-400 font-medium">${n.projName}</span> 
+                    </div>
+                `).join('');
+            }
+            resultsDiv.classList.remove('hidden');
+        };
+
+        window.flyToPoi = function(id) {
+            document.getElementById('poiSearchResults').classList.add('hidden');
+            let targetNode = null; let targetProjId = null;
+            for(let p of MAP_DATA.projects) {
+                let n = p.nodes.find(x => x.id === id);
+                if(n) { targetNode = n; targetProjId = p.id; break; }
+            }
+            if (!targetNode) return;
+            
+            if (displayFloor !== 'ALL' && displayFloor !== targetProjId) switchFloor(targetProjId);
+            map.flyTo({ center: pixelToLngLat(targetNode.x, targetNode.y), zoom: 21, pitch: 60, speed: 1.2 });
+            
+            viewerState.selectedNode = { ...targetNode, projName: MAP_DATA.projects.find(p=>p.id===targetProjId)?.name };
+            updateNodeStyles();
+            renderBottomSheet();
+        };
+
+        // 🌟 寻路与渲染路线
+        window.planRoute = function() {
+            if (!viewerState.navStartNode || !viewerState.navEndNode) return;
+
+            let targetProj = null;
+            for (const proj of MAP_DATA.projects) {
+                if (proj.nodes.find(n => n.id === viewerState.navStartNode)) { targetProj = proj; break; }
+            }
+            if (!targetProj || !targetProj.nodes.find(n => n.id === viewerState.navEndNode)) {
+                alert("目前跨楼层导航正在开发中，请选择同楼层地点！");
+                clearRoute(); return;
+            }
+
+            const adj = {}; targetProj.nodes.forEach(n => adj[n.id] = []);
+            targetProj.edges.forEach(e => {
+                if(adj[e.source] && adj[e.target]) {
+                    const n1 = targetProj.nodes.find(n=>n.id===e.source), n2 = targetProj.nodes.find(n=>n.id===e.target);
+                    const dist = Math.hypot(n1.x-n2.x, n1.y-n2.y);
+                    adj[e.source].push({node: e.target, weight: dist}); adj[e.target].push({node: e.source, weight: dist}); 
+                }
+            });
+
+            const distances = {}; const prev = {}; const unvisited = new Set();
+            targetProj.nodes.forEach(n => { distances[n.id] = Infinity; unvisited.add(n.id); }); distances[viewerState.navStartNode] = 0;
+
+            while(unvisited.size > 0) {
+                let curr = null; let minDist = Infinity;
+                unvisited.forEach(id => { if(distances[id] < minDist) { minDist = distances[id]; curr = id; } });
+                if(!curr || distances[curr] === Infinity) break; 
+                if(curr === viewerState.navEndNode) break; 
+                unvisited.delete(curr);
+                adj[curr].forEach(neighbor => {
+                    if(unvisited.has(neighbor.node)) {
+                        const newDist = distances[curr] + neighbor.weight;
+                        if(newDist < distances[neighbor.node]) { distances[neighbor.node] = newDist; prev[neighbor.node] = curr; }
+                    }
+                });
+            }
+
+            const path = []; let curr = viewerState.navEndNode;
+            if(prev[curr] || curr === viewerState.navStartNode) { while(curr) { path.unshift(curr); curr = prev[curr]; } }
+
+            if(path.length < 2) {
+                alert("路线不通，请检查底图编辑连线！"); viewerState.smoothedRoute = [];
+            } else {
+                viewerState.smoothedRoute = generateSmoothedPath(targetProj, path);
+                viewerState.targetProj = targetProj;
+                
+                // 计算距离供 Bottom Sheet 显示
+                let accDist = 0;
+                for(let i=0; i < viewerState.smoothedRoute.length - 1; i++) {
+                    const p1 = viewerState.smoothedRoute[i], p2 = viewerState.smoothedRoute[i+1];
+                    accDist += Math.hypot(p2.lng - p1.lng, p2.lat - p1.lat) * 111319; 
+                }
+                viewerState.simulation.totalDist = accDist;
+                routeAnim.offset = 0;
+                
+                renderBottomSheet(); // 切换到路线状态 UI
+                
+                // 调整相机视野看清路线
+                const bounds = new maplibregl.LngLatBounds();
+                viewerState.smoothedRoute.forEach(p => bounds.extend([p.lng, p.lat]));
+                map.fitBounds(bounds, { padding: {top: 100, bottom: 300, left: 50, right: 50}, pitch: 45, duration: 1000 });
+            }
+            updateMapboxRouteLayer();
+        }
+
+        window.clearRoute = function() {
+            viewerState.navStartNode = null; viewerState.navEndNode = null; viewerState.smoothedRoute = [];
+            viewerState.selectedNode = null;
+            routeAnim.offset = 0;
+            updateNavPoiMarkers();
+            updateNodeStyles(); updateMapboxRouteLayer(); renderBottomSheet();
+            map.easeTo({ pitch: 45, duration: 1000 });
+        }
+
+        function generateSmoothedPath(proj, nodesIds) {
+            const rawPts = nodesIds.map(id => proj.nodes.find(n => n.id === id)).map(n => ({x: n.x, y: n.y}));
+            if (rawPts.length < 3) return rawPts.map(pt => { const ll = pixelToLngLat(pt.x, pt.y); return { x: pt.x, y: pt.y, lng: ll[0], lat: ll[1] }; });
+            const res = [rawPts[0]]; const cornerRadius = 40;
+            for (let i = 1; i < rawPts.length - 1; i++) {
+                const p0 = rawPts[i-1], p1 = rawPts[i], p2 = rawPts[i+1];
+                const d1 = Math.hypot(p1.x - p0.x, p1.y - p0.y), d2 = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+                const r = Math.min(cornerRadius, d1 / 2.2, d2 / 2.2);
+                const a = { x: p1.x + (p0.x - p1.x) * (r / d1), y: p1.y + (p0.y - p1.y) * (r / d1) };
+                const b = { x: p1.x + (p2.x - p1.x) * (r / d2), y: p1.y + (p2.y - p1.y) * (r / d2) };
+                res.push(a);
+                for(let t = 0.1; t <= 1; t += 0.1) {
+                    const mt = 1 - t; res.push({ x: mt * mt * a.x + 2 * mt * t * p1.x + t * t * b.x, y: mt * mt * a.y + 2 * mt * t * p1.y + t * t * b.y });
+                }
+            }
+            res.push(rawPts[rawPts.length-1]);
+            return res.map(pt => { const ll = pixelToLngLat(pt.x, pt.y); return { x: pt.x, y: pt.y, lng: ll[0], lat: ll[1] }; });
+        }
+
+        // 🌟 导出页路线渲染：完全对齐 箭头.html 的 Canvas 样式与动画
+        function updateMapboxRouteLayer() {
+            if (!map) return;
+            drawRouteCanvas();
+        }
+
+        // 🌟 核心：切换 UI 到沉浸式导航状态
+        window.startSimulation = function() {
+            if(!viewerState.smoothedRoute || viewerState.smoothedRoute.length < 2) return;
+            
+            // 1. 隐藏常规控件 (App Bar, Tools, Bottom Sheet)
+            document.getElementById('topAppBar').classList.add('-translate-y-[150%]');
+            document.getElementById('rightTools').classList.add('opacity-0');
+            document.getElementById('bottomSheet').classList.replace('sheet-visible', 'sheet-hidden');
+            
+            // 2. 显示沉浸式导航 UI (Green Banner, Bottom Card)
+            document.getElementById('navTopBanner').classList.replace('banner-hidden', 'banner-visible');
+            document.getElementById('navBottomCard').classList.replace('sheet-hidden', 'sheet-visible');
+            
+            // 3. 填充目的地数据
+            let endName = "目的地";
+            viewerState.targetProj.nodes.forEach(n => { if(n.id === viewerState.navEndNode) endName = n.label; });
+            document.getElementById('uiDestName').innerText = endName;
+
+            // 4. 初始化引擎数据
+            const sim = viewerState.simulation; sim.segments = []; let accDist = 0;
+            for(let i=0; i < viewerState.smoothedRoute.length - 1; i++) {
+                const p1 = viewerState.smoothedRoute[i], p2 = viewerState.smoothedRoute[i+1];
+                const dist = Math.hypot(p2.lng - p1.lng, p2.lat - p1.lat) * 111319; // 经纬度近似转米
+                const angle = Math.atan2(p2.y - p1.y, p2.x - p1.x); 
+                const mapAngle = Math.atan2(p2.lng - p1.lng, p2.lat - p1.lat) * 180 / Math.PI;
+                sim.segments.push({ p1, p2, dist, accDist, angle, mapAngle }); accDist += dist;
+            }
+            sim.totalDist = accDist; sim.progress = 0; sim.active = true; sim.lastTime = performance.now();
+            
+            // 🌟 优化导航视距: Zoom 调整为 19.5，Pitch调整为 60
+            sim.currentMapAngle = sim.segments[0].mapAngle; 
+            map.flyTo({ center: [sim.segments[0].p1.lng, sim.segments[0].p1.lat], zoom: 19.5, pitch: 60, bearing: sim.currentMapAngle, speed: 1.2 });
+            
+            updateNavUIData(sim.totalDist);
+            setTimeout(() => { sim.animationFrame = requestAnimationFrame(simLoop); }, 1200);
+        }
+
+        // 🌟 核心：退出沉浸式导航状态
+        window.stopSimulation = function() {
+            viewerState.simulation.active = false; 
+            viewerState.simulation.currentLngLat = null;
+            viewerState.simulation.passedCoords = []; 
+            viewerState.simulation.upcomingCoords = [];
+            if (viewerState.simulation.animationFrame) cancelAnimationFrame(viewerState.simulation.animationFrame);
+            
+            // 恢复常规控件
+            document.getElementById('topAppBar').classList.remove('-translate-y-[150%]');
+            document.getElementById('rightTools').classList.remove('opacity-0');
+            document.getElementById('bottomSheet').classList.replace('sheet-hidden', 'sheet-visible'); // 恢复抽屉
+            
+            // 隐藏沉浸式 UI
+            document.getElementById('navTopBanner').classList.replace('banner-visible', 'banner-hidden');
+            document.getElementById('navBottomCard').classList.replace('sheet-visible', 'sheet-hidden');
+
+            updateMapboxSimLayer();
+            updateMapboxRouteLayer(); // 退出时恢复完整的蓝色路线
+            resetCompass();
+            
+            // 相机恢复概览
+            const bounds = new maplibregl.LngLatBounds();
+            viewerState.smoothedRoute.forEach(p => bounds.extend([p.lng, p.lat]));
+            map.fitBounds(bounds, { padding: 80, pitch: 45, duration: 800 });
+        }
+
+        function simLoop(time) {
+            if(!viewerState.simulation.active) return;
+            const dt = (time - viewerState.simulation.lastTime) / 1000; viewerState.simulation.lastTime = time;
+            
+            viewerState.simulation.progress += (1.2 * 4) * dt; // 按照 1.2m/s，4倍速模拟播放
+            const remainingDist = viewerState.simulation.totalDist - viewerState.simulation.progress;
+            
+            if(remainingDist <= 0) {
+                updateNavUIData(0);
+                setTimeout(() => { stopSimulation(); alert("已到达目的地！"); }, 100); return;
+            }
+            
+            updateNavUIData(remainingDist);
+            updateSimPosition(); 
+            viewerState.simulation.animationFrame = requestAnimationFrame(simLoop);
+        }
+
+        // 🌟 更新 UI 数据面板
+        function updateNavUIData(remainMeters) {
+            const m = Math.max(0, remainMeters);
+            document.getElementById('uiDistVal').innerText = Math.round(m) + '米';
+            
+            const totalSeconds = m / 1.2;
+            const mins = Math.max(1, Math.ceil(totalSeconds / 60));
+            
+            document.getElementById('navEtaTop').innerText = `预计 ${mins}分钟后 到达`;
+        }
+
+        // 🌟 核心：计算当前位置，并切割动态路线
+        function updateSimPosition() {
+            const sim = viewerState.simulation; 
+            let currentSeg = sim.segments[sim.segments.length-1];
+            let segIdx = sim.segments.length-1;
+            
+            for(let i=0; i<sim.segments.length; i++) { 
+                if(sim.progress <= sim.segments[i].accDist + sim.segments[i].dist) { 
+                    currentSeg = sim.segments[i]; 
+                    segIdx = i;
+                    break; 
+                } 
+            }
+            const ratio = currentSeg.dist > 0 ? (sim.progress - currentSeg.accDist) / currentSeg.dist : 1;
+            sim.currentLngLat = [ currentSeg.p1.lng + (currentSeg.p2.lng - currentSeg.p1.lng) * ratio, currentSeg.p1.lat + (currentSeg.p2.lat - currentSeg.p1.lat) * ratio ];
+            
+            // 动态切割路线
+            sim.passedCoords = [];
+            for (let i = 0; i <= segIdx; i++) {
+                sim.passedCoords.push([sim.segments[i].p1.lng, sim.segments[i].p1.lat]);
+            }
+            sim.passedCoords.push(sim.currentLngLat);
+
+            sim.upcomingCoords = [sim.currentLngLat];
+            for (let i = segIdx; i < sim.segments.length; i++) {
+                sim.upcomingCoords.push([sim.segments[i].p2.lng, sim.segments[i].p2.lat]);
+            }
+
+            const diff = currentSeg.mapAngle - sim.currentMapAngle;
+            sim.currentMapAngle += ((diff + 540) % 360 - 180) * 0.15; 
+            
+            updateMapboxSimLayer();
+            updateMapboxRouteLayer(); // 实时刷新渲染切断后的双色路线
+            
+            // 跟随视角
+            map.easeTo({ center: sim.currentLngLat, bearing: sim.currentMapAngle, pitch: 60, duration: 0 });
+        }
+
+        function updateMapboxSimLayer() {
+            if(!map || !map.isStyleLoaded()) return;
+            const currentElev = viewerState.targetProj ? (viewerState.targetProj.elevation || 0) : 0;
+            const sizeMult = viewerState.simulation.arrowSize || 0.8;
+            let simGeoJSON = { type: 'FeatureCollection', features: [] };
+            
+            if(viewerState.simulation.active && viewerState.simulation.currentLngLat) {
+                const size = 0.000015 * sizeMult; const rad = viewerState.simulation.currentMapAngle * Math.PI / 180; const cos = Math.cos(rad), sin = Math.sin(rad);
+                const rotate = (dx, dy) => [ viewerState.simulation.currentLngLat[0] + (dx * cos + dy * sin), viewerState.simulation.currentLngLat[1] + (-dx * sin + dy * cos) ];
+                const arrowCoords = [[rotate(0, size * 1.5), rotate(size * 0.8, -size), rotate(0, -size * 0.4), rotate(-size * 0.8, -size), rotate(0, size * 1.5)]];
+                simGeoJSON.features.push({ type: 'Feature', properties: { projectId: viewerState.targetProj ? viewerState.targetProj.id : null, height: currentElev + 1.0 * sizeMult, base: currentElev + 0.2 }, geometry: { type: 'Polygon', coordinates: arrowCoords } });
+            }
+            if(map.getSource('indoor-sim')) map.getSource('indoor-sim').setData(simGeoJSON);
+            else {
+                map.addSource('indoor-sim', { type: 'geojson', data: simGeoJSON });
+                map.addLayer({ id: 'indoor-sim-marker', type: 'fill-extrusion', source: 'indoor-sim', paint: { 'fill-extrusion-color': viewerState.simulation.arrowColor, 'fill-extrusion-height': ['get', 'height'], 'fill-extrusion-base': ['get', 'base'], 'fill-extrusion-opacity': 1.0 } });
+            }
+            updateFilters();
+        }
+
+        initMap();
+    </script>
+</body>
+</html>
+
